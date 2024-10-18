@@ -46,15 +46,12 @@ class BlogPost(db.Model):
     path = db.StringProperty()
     title = db.StringProperty(required=True, indexed=False)
     body_markup = db.StringProperty(choices=set(markup.MARKUP_MAP),
-                                     default=DEFAULT_MARKUP)
+                                    default=DEFAULT_MARKUP)
     body = db.TextProperty(required=True)
     tags = aetycoon.SetProperty(basestring, indexed=False)
     published = db.DateTimeProperty()
     updated = db.DateTimeProperty(auto_now=False)
     deps = aetycoon.PickleProperty()
-
-    # New property to support multiple authors
-    authors = aetycoon.SetProperty(basestring, indexed=False)  # List of author names
 
     @property
     def published_tz(self):
@@ -74,8 +71,29 @@ class BlogPost(db.Model):
 
     @property
     def rendered(self):
-        """Returns the rendered body."""
-        return markup.render_body(self)
+        """Returns the rendered body along with comments section."""
+        return f"""
+        {markup.render_body(self)}
+        {self.comments_html}
+        """
+
+    @property
+    def comments_html(self):
+        """Returns the HTML for the Google Friend Connect comment widget."""
+        site_id = 'YOUR_SITE_ID'  # Replace with your actual Google Friend Connect site ID
+        return f"""
+        <div id="gfc-comments" class="gfc-container"
+             data-site-id="{site_id}"
+             data-identifier="{self.path}">
+        </div>
+        <script src="https://www.google.com/friendconnect/script/friendconnect.js"></script>
+        <script>
+            google.friendconnect.container.initPopupWidget({{
+                id: "{site_id}",
+                container: "gfc-comments"
+            }});
+        </script>
+        """
 
     @property
     def summary(self):
