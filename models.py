@@ -1,21 +1,14 @@
-import aetycoon
-import datetime
 import hashlib
-import re
+import datetime
 from google.appengine.ext import db
 from google.appengine.ext import deferred
-
+from google.appengine.api import memcache  # Import memcache
+import aetycoon
 import config
 import generators
 import markup
 import static
 import utils
-
-if config.default_markup in markup.MARKUP_MAP:
-    DEFAULT_MARKUP = config.default_markup
-else:
-    DEFAULT_MARKUP = 'html'
-
 
 class BlogDate(db.Model):
     """Contains a list of year-months for published blog posts."""
@@ -41,11 +34,9 @@ class BlogDate(db.Model):
 
 
 class BlogPost(db.Model):
-    # The URL path to the blog post. Posts have a path iff they are published.
     path = db.StringProperty()
     title = db.StringProperty(required=True, indexed=False)
-    body_markup = db.StringProperty(choices=set(markup.MARKUP_MAP),
-                                    default=DEFAULT_MARKUP)
+    body_markup = db.StringProperty(choices=set(markup.MARKUP_MAP), default=config.default_markup)
     body = db.TextProperty(required=True)
     tags = aetycoon.SetProperty(basestring, indexed=False)
     published = db.DateTimeProperty()
@@ -70,23 +61,21 @@ class BlogPost(db.Model):
 
     @property
     def rendered(self):
-        """Returns the rendered body."""
         return markup.render_body(self)
 
     @property
     def summary(self):
-        """Returns a summary of the blog post."""
         return markup.render_summary(self)
 
     @property
     def hash(self):
         val = (self.title, self.body, self.published)
-        return hashlib.sha1(str(val)).hexdigest()
+        return hashlib.sha1(str(val).encode()).hexdigest()
 
     @property
     def summary_hash(self):
         val = (self.title, self.summary, self.tags, self.published)
-        return hashlib.sha1(str(val)).hexdigest()
+        return hashlib.sha1(str(val).encode()).hexdigest()
 
     def publish(self):
         regenerate = False
@@ -99,11 +88,14 @@ class BlogPost(db.Model):
                 num += 1
             self.path = path
             self.put()
-            # Force regenerate on new publish. Also helps with generation of
-            # chronologically previous and next page.
             regenerate = True
 
         BlogDate.create_for_post(self)
+
+        # Check if the content is in memcache
+        cached_content = memcache.get(self.path)
+        if cached_content:
+            return cached_content
 
         for generator_class, deps in self.get_deps(regenerate=regenerate):
             for dep in deps:
@@ -116,9 +108,10 @@ class BlogPost(db.Model):
     def remove(self):
         if not self.is_saved():
             return
-        # It is important that the get_deps() return the post dependency
-        # before the list dependencies as the BlogPost entity gets deleted
-        # while calling PostContentGenerator.
+        # Delete the static content for the post
+        if self.path:
+            static.delete(self.path)  # Assuming there is a delete method in the static module
+            memcache.delete(self.path)  # Clear the cached content from memcache
         for generator_class, deps in self.get_deps(regenerate=True):
             for dep in deps:
                 if generator_class.can_defer:
@@ -138,31 +131,14 @@ class BlogPost(db.Model):
             new_etag = generator_class.get_etag(self)
             old_deps, old_etag = self.deps.get(generator_class.name(), (set(), None))
             if new_etag != old_etag or regenerate:
-                # If the etag has changed, regenerate everything
                 to_regenerate = new_deps | old_deps
             else:
-                # Otherwise just regenerate the changes
                 to_regenerate = new_deps ^ old_deps
             self.deps[generator_class.name()] = (new_deps, new_etag)
             yield generator_class, to_regenerate
 
-    @classmethod
-    def get_posts_by_month(cls, year, month):
-        """Fetch posts for a specific month and year."""
-        start_date = datetime.datetime(year, month, 1)
-        end_date = datetime.datetime(year, month + 1, 1) if month < 12 else datetime.datetime(year + 1, 1, 1)
-        return cls.all().filter('published >=', start_date).filter('published <', end_date).fetch(100)
-
-    @classmethod
-    def get_posts_by_year(cls, year):
-        """Fetch posts for a specific year."""
-        start_date = datetime.datetime(year, 1, 1)
-        end_date = datetime.datetime(year + 1, 1, 1)
-        return cls.all().filter('published >=', start_date).filter('published <', end_date).fetch(100)
-
 
 class Page(db.Model):
-    # The URL path to the page.
     path = db.StringProperty(required=True)
     title = db.TextProperty(required=True)
     template = db.StringProperty(required=True)
@@ -172,13 +148,12 @@ class Page(db.Model):
 
     @property
     def rendered(self):
-        # Returns the rendered body.
         return markup.render_body(self)
 
     @property
     def hash(self):
-        val = (self.path, self.body, self.published)
-        return hashlib.sha1(str(val)).hexdigest()
+        val = (self.path, self.body)
+        return hashlib.sha1(str(val).encode()).hexdigest()
 
     def publish(self):
         self._key_name = self.path
@@ -199,46 +174,4 @@ class VersionInfo(db.Model):
 
     @property
     def bloggart_version(self):
-        return (self.bloggart_major, self.bloggart_minor, self.bloggart_rev)
-
-
-import webapp2
-
-class MonthlyArchiveHandler(webapp2.RequestHandler):
-    def get(self, year, month):
-        """Handle requests for monthly archive."""
-        year = int(year)
-        month = int(month)
-        posts = BlogPost.get_posts_by_month(year, month)
-        # Render the posts in the template for monthly archive.
-        self.response.out.write(self.render_monthly_archive(year, month, posts))
-
-    def render_monthly_archive(self, year, month, posts):
-        response = f"<h1>Archive for {month}/{year}</h1>"
-        for post in posts:
-            response += f"<h2>{post.title}</h2>"
-            response += f"<p>{post.summary}</p>"
-        return response
-
-
-class YearlyArchiveHandler(webapp2.RequestHandler):
-    def get(self, year):
-        """Handle requests for yearly archive."""
-        year = int(year)
-        posts = BlogPost.get_posts_by_year(year)
-        # Render the posts in the template for yearly archive.
-        self.response.out.write(self.render_yearly_archive(year, posts))
-
-    def render_yearly_archive(self, year, posts):
-        response = f"<h1>Archive for {year}</h1>"
-        for post in posts:
-            response += f"<h2>{post.title}</h2>"
-            response += f"<p>{post.summary}</p>"
-        return response
-
-
-app = webapp2.WSGIApplication([
-    # Existing routes...
-    webapp2.Route('/archive/<year:\d{4}>', handler=YearlyArchiveHandler),
-    webapp2.Route('/archive/<year:\d{4}>/<month:\d{1,2}>', handler=MonthlyArchiveHandler),
-], debug=True) 
+        return (self.bloggart_major, self.bloggart_minor, self.bloggart_rev) 
