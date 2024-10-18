@@ -1,14 +1,23 @@
-import hashlib
+import aetycoon
 import datetime
+import hashlib
+import re
 from google.appengine.ext import db
 from google.appengine.ext import deferred
 from google.appengine.api import memcache  # Import memcache
-import aetycoon
+
 import config
 import generators
 import markup
 import static
 import utils
+
+
+if config.default_markup in markup.MARKUP_MAP:
+    DEFAULT_MARKUP = config.default_markup
+else:
+    DEFAULT_MARKUP = 'html'
+
 
 class BlogDate(db.Model):
     """Contains a list of year-months for published blog posts."""
@@ -36,7 +45,7 @@ class BlogDate(db.Model):
 class BlogPost(db.Model):
     path = db.StringProperty()
     title = db.StringProperty(required=True, indexed=False)
-    body_markup = db.StringProperty(choices=set(markup.MARKUP_MAP), default=config.default_markup)
+    body_markup = db.StringProperty(choices=set(markup.MARKUP_MAP), default=DEFAULT_MARKUP)
     body = db.TextProperty(required=True)
     tags = aetycoon.SetProperty(basestring, indexed=False)
     published = db.DateTimeProperty()
@@ -61,21 +70,23 @@ class BlogPost(db.Model):
 
     @property
     def rendered(self):
+        """Returns the rendered body."""
         return markup.render_body(self)
 
     @property
     def summary(self):
+        """Returns a summary of the blog post."""
         return markup.render_summary(self)
 
     @property
     def hash(self):
         val = (self.title, self.body, self.published)
-        return hashlib.sha1(str(val).encode()).hexdigest()
+        return hashlib.sha1(str(val)).hexdigest()
 
     @property
     def summary_hash(self):
         val = (self.title, self.summary, self.tags, self.published)
-        return hashlib.sha1(str(val).encode()).hexdigest()
+        return hashlib.sha1(str(val)).hexdigest()
 
     def publish(self):
         regenerate = False
@@ -90,11 +101,15 @@ class BlogPost(db.Model):
             self.put()
             regenerate = True
 
+            # Cache the content in memcache
+            memcache.set(self.path, content)
+
         BlogDate.create_for_post(self)
 
         # Check if the content is in memcache
         cached_content = memcache.get(self.path)
         if cached_content:
+            # Use the cached content
             return cached_content
 
         for generator_class, deps in self.get_deps(regenerate=regenerate):
@@ -108,10 +123,6 @@ class BlogPost(db.Model):
     def remove(self):
         if not self.is_saved():
             return
-        # Delete the static content for the post
-        if self.path:
-            static.delete(self.path)  # Assuming there is a delete method in the static module
-            memcache.delete(self.path)  # Clear the cached content from memcache
         for generator_class, deps in self.get_deps(regenerate=True):
             for dep in deps:
                 if generator_class.can_defer:
@@ -152,8 +163,8 @@ class Page(db.Model):
 
     @property
     def hash(self):
-        val = (self.path, self.body)
-        return hashlib.sha1(str(val).encode()).hexdigest()
+        val = (self.path, self.body, self.published)
+        return hashlib.sha1(str(val)).hexdigest()
 
     def publish(self):
         self._key_name = self.path
