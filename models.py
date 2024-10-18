@@ -11,7 +11,6 @@ import markup
 import static
 import utils
 
-
 if config.default_markup in markup.MARKUP_MAP:
     DEFAULT_MARKUP = config.default_markup
 else:
@@ -117,9 +116,6 @@ class BlogPost(db.Model):
     def remove(self):
         if not self.is_saved():
             return
-        # Remove associated tags when a blog post is deleted
-        self.remove_tags()
-
         # It is important that the get_deps() return the post dependency
         # before the list dependencies as the BlogPost entity gets deleted
         # while calling PostContentGenerator.
@@ -133,18 +129,6 @@ class BlogPost(db.Model):
                         self.delete()
                     else:
                         generator_class.generate_resource(self, dep)
-
-    def remove_tags(self):
-        """Remove the tags associated with the blog post."""
-        for tag in self.tags:
-            tag_key_name = utils.slugify(tag.lower())
-            tag_entity = Tag.get_by_key_name(tag_key_name)
-            if tag_entity:
-                tag_entity.count -= 1
-                if tag_entity.count <= 0:
-                    tag_entity.delete()  # Delete tag if count is zero
-                else:
-                    tag_entity.put()  # Update tag count if still exists
 
     def get_deps(self, regenerate=False):
         if not self.deps:
@@ -162,15 +146,19 @@ class BlogPost(db.Model):
             self.deps[generator_class.name()] = (new_deps, new_etag)
             yield generator_class, to_regenerate
 
-
-class Tag(db.Model):
-    """Represents a tag for blog posts."""
-    name = db.StringProperty(required=True, indexed=True)
-    count = db.IntegerProperty(default=0)
+    @classmethod
+    def get_posts_by_month(cls, year, month):
+        """Fetch posts for a specific month and year."""
+        start_date = datetime.datetime(year, month, 1)
+        end_date = datetime.datetime(year, month + 1, 1) if month < 12 else datetime.datetime(year + 1, 1, 1)
+        return cls.all().filter('published >=', start_date).filter('published <', end_date).fetch(100)
 
     @classmethod
-    def get_by_key_name(cls, key_name):
-        return cls.get_by_id(key_name)  # Assuming `key_name` is the ID
+    def get_posts_by_year(cls, year):
+        """Fetch posts for a specific year."""
+        start_date = datetime.datetime(year, 1, 1)
+        end_date = datetime.datetime(year + 1, 1, 1)
+        return cls.all().filter('published >=', start_date).filter('published <', end_date).fetch(100)
 
 
 class Page(db.Model):
@@ -211,4 +199,46 @@ class VersionInfo(db.Model):
 
     @property
     def bloggart_version(self):
-        return (self.bloggart_major, self.bloggart_minor, self.bloggart_rev) 
+        return (self.bloggart_major, self.bloggart_minor, self.bloggart_rev)
+
+
+import webapp2
+
+class MonthlyArchiveHandler(webapp2.RequestHandler):
+    def get(self, year, month):
+        """Handle requests for monthly archive."""
+        year = int(year)
+        month = int(month)
+        posts = BlogPost.get_posts_by_month(year, month)
+        # Render the posts in the template for monthly archive.
+        self.response.out.write(self.render_monthly_archive(year, month, posts))
+
+    def render_monthly_archive(self, year, month, posts):
+        response = f"<h1>Archive for {month}/{year}</h1>"
+        for post in posts:
+            response += f"<h2>{post.title}</h2>"
+            response += f"<p>{post.summary}</p>"
+        return response
+
+
+class YearlyArchiveHandler(webapp2.RequestHandler):
+    def get(self, year):
+        """Handle requests for yearly archive."""
+        year = int(year)
+        posts = BlogPost.get_posts_by_year(year)
+        # Render the posts in the template for yearly archive.
+        self.response.out.write(self.render_yearly_archive(year, posts))
+
+    def render_yearly_archive(self, year, posts):
+        response = f"<h1>Archive for {year}</h1>"
+        for post in posts:
+            response += f"<h2>{post.title}</h2>"
+            response += f"<p>{post.summary}</p>"
+        return response
+
+
+app = webapp2.WSGIApplication([
+    # Existing routes...
+    webapp2.Route('/archive/<year:\d{4}>', handler=YearlyArchiveHandler),
+    webapp2.Route('/archive/<year:\d{4}>/<month:\d{1,2}>', handler=MonthlyArchiveHandler),
+], debug=True) 
