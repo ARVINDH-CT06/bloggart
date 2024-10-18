@@ -12,7 +12,6 @@ import markup
 import static
 import utils
 
-
 if config.default_markup in markup.MARKUP_MAP:
     DEFAULT_MARKUP = config.default_markup
 else:
@@ -43,9 +42,11 @@ class BlogDate(db.Model):
 
 
 class BlogPost(db.Model):
+    # The URL path to the blog post. Posts have a path iff they are published.
     path = db.StringProperty()
     title = db.StringProperty(required=True, indexed=False)
-    body_markup = db.StringProperty(choices=set(markup.MARKUP_MAP), default=DEFAULT_MARKUP)
+    body_markup = db.StringProperty(choices=set(markup.MARKUP_MAP),
+                                    default=DEFAULT_MARKUP)
     body = db.TextProperty(required=True)
     tags = aetycoon.SetProperty(basestring, indexed=False)
     published = db.DateTimeProperty()
@@ -99,18 +100,11 @@ class BlogPost(db.Model):
                 num += 1
             self.path = path
             self.put()
+            # Force regenerate on new publish. Also helps with generation of
+            # chronologically previous and next page.
             regenerate = True
 
-            # Cache the content in memcache
-            memcache.set(self.path, content)
-
         BlogDate.create_for_post(self)
-
-        # Check if the content is in memcache
-        cached_content = memcache.get(self.path)
-        if cached_content:
-            # Use the cached content
-            return cached_content
 
         for generator_class, deps in self.get_deps(regenerate=regenerate):
             for dep in deps:
@@ -123,6 +117,9 @@ class BlogPost(db.Model):
     def remove(self):
         if not self.is_saved():
             return
+        # It is important that the get_deps() return the post dependency
+        # before the list dependencies as the BlogPost entity gets deleted
+        # while calling PostContentGenerator.
         for generator_class, deps in self.get_deps(regenerate=True):
             for dep in deps:
                 if generator_class.can_defer:
@@ -142,14 +139,17 @@ class BlogPost(db.Model):
             new_etag = generator_class.get_etag(self)
             old_deps, old_etag = self.deps.get(generator_class.name(), (set(), None))
             if new_etag != old_etag or regenerate:
+                # If the etag has changed, regenerate everything
                 to_regenerate = new_deps | old_deps
             else:
+                # Otherwise just regenerate the changes
                 to_regenerate = new_deps ^ old_deps
             self.deps[generator_class.name()] = (new_deps, new_etag)
             yield generator_class, to_regenerate
 
 
 class Page(db.Model):
+    # The URL path to the page.
     path = db.StringProperty(required=True)
     title = db.TextProperty(required=True)
     template = db.StringProperty(required=True)
@@ -159,6 +159,7 @@ class Page(db.Model):
 
     @property
     def rendered(self):
+        # Returns the rendered body.
         return markup.render_body(self)
 
     @property
@@ -177,6 +178,9 @@ class Page(db.Model):
         self.delete()
         generators.PageContentGenerator.generate_resource(self, self.path, action='delete')
 
+        # Remove the page from memcache
+        memcache.delete(self.path)  # Clear cache for this page
+
 
 class VersionInfo(db.Model):
     bloggart_major = db.IntegerProperty(required=True)
@@ -185,4 +189,20 @@ class VersionInfo(db.Model):
 
     @property
     def bloggart_version(self):
-        return (self.bloggart_major, self.bloggart_minor, self.bloggart_rev) 
+        return (self.bloggart_major, self.bloggart_minor, self.bloggart_rev)
+
+# Memcache handler function
+def get_cached_page(path):
+    # Try to get the cached page from memcache
+    cached_page = memcache.get(path)
+    if cached_page is not None:
+        return cached_page  # Return cached response
+
+    # If not cached, retrieve from the database (or wherever the page is stored)
+    page = Page.get_by_key_name(path)
+    if page:
+        # Cache the page for future requests
+        memcache.set(path, page.rendered, time=3600)  # Cache for 1 hour
+        return page.rendered
+
+    return None 
