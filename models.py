@@ -4,13 +4,13 @@ import hashlib
 import re
 from google.appengine.ext import db
 from google.appengine.ext import deferred
-from google.appengine.api import memcache  # Import memcache
 
 import config
 import generators
 import markup
 import static
 import utils
+
 
 if config.default_markup in markup.MARKUP_MAP:
     DEFAULT_MARKUP = config.default_markup
@@ -46,12 +46,15 @@ class BlogPost(db.Model):
     path = db.StringProperty()
     title = db.StringProperty(required=True, indexed=False)
     body_markup = db.StringProperty(choices=set(markup.MARKUP_MAP),
-                                    default=DEFAULT_MARKUP)
+                                     default=DEFAULT_MARKUP)
     body = db.TextProperty(required=True)
     tags = aetycoon.SetProperty(basestring, indexed=False)
     published = db.DateTimeProperty()
     updated = db.DateTimeProperty(auto_now=False)
     deps = aetycoon.PickleProperty()
+
+    # New property to support multiple authors
+    authors = aetycoon.SetProperty(basestring, indexed=False)  # List of author names
 
     @property
     def published_tz(self):
@@ -178,9 +181,6 @@ class Page(db.Model):
         self.delete()
         generators.PageContentGenerator.generate_resource(self, self.path, action='delete')
 
-        # Remove the page from memcache
-        memcache.delete(self.path)  # Clear cache for this page
-
 
 class VersionInfo(db.Model):
     bloggart_major = db.IntegerProperty(required=True)
@@ -189,20 +189,4 @@ class VersionInfo(db.Model):
 
     @property
     def bloggart_version(self):
-        return (self.bloggart_major, self.bloggart_minor, self.bloggart_rev)
-
-# Memcache handler function
-def get_cached_page(path):
-    # Try to get the cached page from memcache
-    cached_page = memcache.get(path)
-    if cached_page is not None:
-        return cached_page  # Return cached response
-
-    # If not cached, retrieve from the database (or wherever the page is stored)
-    page = Page.get_by_key_name(path)
-    if page:
-        # Cache the page for future requests
-        memcache.set(path, page.rendered, time=3600)  # Cache for 1 hour
-        return page.rendered
-
-    return None 
+        return (self.bloggart_major, self.bloggart_minor, self.bloggart_rev) 
